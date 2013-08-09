@@ -4,6 +4,7 @@
  */
 
 /* Written in 2011, 2012 by John Ford <jhford@mozilla.com>
+ * More hacking by Vladimir Vukicevic <vladimir@pobox.com>
  *
  * This program is a replacement for the Posix 'rm' utility implemented as
  * a native Windows win32 application.  Build using accompanying Makefile
@@ -29,7 +30,8 @@
 /* This function takes an errNum, filename of the file being operated on and
  * a stdio file handle to the file where output should be printed
  */
-void print_error(DWORD errNum, wchar_t* filename, FILE* fhandle){
+void
+print_error(DWORD errNum, wchar_t* filename, FILE* fhandle) {
     wchar_t* msg;
     FormatMessageW(
             FORMAT_MESSAGE_ALLOCATE_BUFFER |
@@ -46,7 +48,9 @@ void print_error(DWORD errNum, wchar_t* filename, FILE* fhandle){
 /* Remove an empty directory.  This will fail if there are still files or
  * other directories in the directory specified by name
  */
-BOOL del_directory(wchar_t* name, BOOL force, BOOL verbose, BOOL quiet){
+BOOL
+del_directory(wchar_t* name, BOOL force, BOOL verbose, BOOL quiet)
+{
     BOOL rv = TRUE;
     if (verbose) {
         fwprintf(stdout, L"deleting directory \"%ws\"\n", name);
@@ -67,7 +71,9 @@ BOOL del_directory(wchar_t* name, BOOL force, BOOL verbose, BOOL quiet){
 /* Remove a file.  If force is true, read only and system file system
  * attributes are cleared before deleting the file
  */
-BOOL del_file(wchar_t* name, BOOL force, BOOL verbose, BOOL quiet){
+BOOL
+del_file(wchar_t* name, BOOL force, BOOL verbose, BOOL quiet)
+{
     BOOL rv = TRUE;
     if (force) {
         DWORD fileAttr = GetFileAttributesW(name);
@@ -117,7 +123,9 @@ BOOL del_file(wchar_t* name, BOOL force, BOOL verbose, BOOL quiet){
 /* This function will recursively remove all files in a directory
  * then the directory itself.
  */
-BOOL empty_directory(wchar_t* name, BOOL force, BOOL verbose, BOOL quiet){
+BOOL
+empty_directory(wchar_t* name, BOOL force, BOOL verbose, BOOL quiet)
+{
     BOOL rv = TRUE;
     DWORD ffStatus;
     WIN32_FIND_DATAW findFileData;
@@ -198,7 +206,9 @@ BOOL empty_directory(wchar_t* name, BOOL force, BOOL verbose, BOOL quiet){
  * to print to stderr.  The quiet option will supress all but fatal 
  * error messages
  */
-BOOL del(wchar_t* name, BOOL recurse, BOOL force, BOOL verbose, BOOL quiet) {
+BOOL
+del(wchar_t* name, BOOL recurse, BOOL force, BOOL verbose, BOOL quiet)
+{
     BOOL rv = TRUE;
     DWORD fileAttr = GetFileAttributesW(name);
     if (fileAttr == INVALID_FILE_ATTRIBUTES){
@@ -225,12 +235,13 @@ BOOL del(wchar_t* name, BOOL recurse, BOOL force, BOOL verbose, BOOL quiet) {
 }
 
 /* This struct is used by the command line parser */
-struct node{
+struct node {
     node *next;
     wchar_t* data;
 };
 
-int wmain(int argc, wchar_t** argv)
+int
+wmain(int argc, wchar_t** argv)
 {
     int exitCode = 0;
     int i, j;
