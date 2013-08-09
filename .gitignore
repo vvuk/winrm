@@ -1,0 +1,6 @@
+.hg
+rm.exe
+rm.obj
+winrm.exe
+*.pdb
+*.ilk
