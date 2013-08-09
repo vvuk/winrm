@@ -1,8 +1,5 @@
-winrm.exe: rm.obj
-	link rm.obj -out:winrm.exe
-
-rm.obj: rm.cpp
-	cl -c rm.cpp -out:rm.obj
+winrm.exe: rm.cpp
+	cl -Zi -DUNICODE=1 -D_UNICODE=1 rm.cpp -Fewinrm.exe
 
 test: winrm.exe
 	@echo Testing single file operations
@@ -24,7 +21,6 @@ test: winrm.exe
 	touch dir1/file1 dir1/dir2/file2 dir1/dir2/dir3/file3
 	winrm.exe -v -r dir1
 	@echo Completed successfully
-	
 
 clean:
 	rm -rf rm.obj winrm.exe

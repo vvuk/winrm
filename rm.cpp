@@ -13,11 +13,26 @@
  *    cl rm.cpp
  */
 #include <windows.h>
+#include <WinIoCtl.h>
+
 #include <Strsafe.h>
 #include <string.h>
 #include <stdio.h>
 
+#ifndef IO_REPARSE_TAG_MOUNT_POINT
+#define IO_REPARSE_TAG_MOUNT_POINT 0xA0000003
+#endif
 
+#ifndef IO_REPARSE_TAG_SYMLINK
+#define IO_REPARSE_TAG_SYMLINK 0xA000000C
+#endif
+
+static bool hasSymlinks = false;
+static bool deleteJunctions = false;
+static bool quiet = false;
+static bool verbose = false;
+static bool force = false;
+static bool recurse = false;
 
 /* TODO:
  *   -should the wow64fsredirection stuff be applicable to the whole app
@@ -45,16 +60,103 @@ print_error(DWORD errNum, wchar_t* filename, FILE* fhandle) {
     fwprintf(fhandle, L"\"%ws\" - %ws", filename, msg);
 }
 
+/*
+ * Deal with symlinks and reparse points on directories.  Returns TRUE and sets rv
+ * if it handled the deletion.
+ */
+BOOL
+handle_del_reparse_point(wchar_t *name, BOOL *rv)
+{
+    if ((GetFileAttributesW(name) & FILE_ATTRIBUTE_REPARSE_POINT) == 0)
+        return FALSE;
+
+    if (!(hasSymlinks || deleteJunctions))
+        return FALSE;
+
+    HANDLE hDir = CreateFile(name, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE | FILE_SHARE_WRITE,
+                             NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    if (!hDir) {
+        fwprintf(stderr, L"Failed to open directory '%ws': 0x%08x\n", name, GetLastError());
+        *rv = FALSE;
+        return TRUE;
+    }
+
+    REPARSE_GUID_DATA_BUFFER *rd = (REPARSE_GUID_DATA_BUFFER*) malloc(MAXIMUM_REPARSE_DATA_BUFFER_SIZE);
+    DWORD dwRet;
+
+    if (!DeviceIoControl(hDir, FSCTL_GET_REPARSE_POINT, NULL, 0,
+                         rd, MAXIMUM_REPARSE_DATA_BUFFER_SIZE,
+                         &dwRet, NULL))
+    {
+        fwprintf(stderr, L"DeviceIoControl failed for directory '%ws': 0x%08x\n", name, GetLastError());
+        *rv = FALSE;
+        return TRUE;
+    }
+
+    if (rd->ReparseTag == IO_REPARSE_TAG_SYMLINK) {
+        // This is a symlink; we must hand it to del_directory directly
+        // to delete the symlink (which is done by deleting the directory normally).
+        CloseHandle(hDir);
+        free(rd);
+
+        *rv = RemoveDirectoryW(name);
+        if (!*rv) {
+            if (!quiet) {
+                print_error(GetLastError(), name, stderr);
+            }
+        }
+        if (verbose) {
+            fwprintf(stdout, L"deleted symlink directory \"%ws\"\n", name);
+        }
+        return TRUE;
+    }
+
+    if (rd->ReparseTag == IO_REPARSE_TAG_MOUNT_POINT &&
+        deleteJunctions)
+    {
+        DWORD tag = rd->ReparseTag;
+        GUID gu = rd->ReparseGuid;
+        
+        memset(rd, 0, MAXIMUM_REPARSE_DATA_BUFFER_SIZE);
+        rd->ReparseTag = tag;
+
+        BOOL ok = DeviceIoControl(hDir, FSCTL_DELETE_REPARSE_POINT, rd,
+                                  REPARSE_GUID_DATA_BUFFER_HEADER_SIZE, NULL, 0, &dwRet, NULL);
+        if (!ok) {
+            rd->ReparseGuid = gu;
+            ok = DeviceIoControl(hDir, FSCTL_DELETE_REPARSE_POINT, rd,
+                                 REPARSE_GUID_DATA_BUFFER_HEADER_SIZE, NULL, 0, &dwRet, NULL);
+        }
+
+        if (!ok) {
+            fwprintf(stderr, L"DeviceIoControl failed to delete junction '%ws': 0x%08x\n", name, GetLastError());
+        }
+
+        *rv = ok;
+        CloseHandle(hDir);
+        free(rd);
+        return TRUE;
+    }
+
+    CloseHandle(hDir);
+    free(rd);
+    return FALSE;
+}
+
 /* Remove an empty directory.  This will fail if there are still files or
  * other directories in the directory specified by name
  */
 BOOL
-del_directory(wchar_t* name, BOOL force, BOOL verbose, BOOL quiet)
+del_directory(wchar_t* name)
 {
     BOOL rv = TRUE;
     if (verbose) {
         fwprintf(stdout, L"deleting directory \"%ws\"\n", name);
     }
+
+    if (handle_del_reparse_point(name, &rv))
+        return rv;
+
     BOOL delStatus = RemoveDirectoryW(name);
     if (!delStatus) {
         rv = FALSE;
@@ -72,7 +174,7 @@ del_directory(wchar_t* name, BOOL force, BOOL verbose, BOOL quiet)
  * attributes are cleared before deleting the file
  */
 BOOL
-del_file(wchar_t* name, BOOL force, BOOL verbose, BOOL quiet)
+del_file(wchar_t* name)
 {
     BOOL rv = TRUE;
     if (force) {
@@ -124,7 +226,7 @@ del_file(wchar_t* name, BOOL force, BOOL verbose, BOOL quiet)
  * then the directory itself.
  */
 BOOL
-empty_directory(wchar_t* name, BOOL force, BOOL verbose, BOOL quiet)
+empty_directory(wchar_t* name)
 {
     BOOL rv = TRUE;
     DWORD ffStatus;
@@ -134,6 +236,14 @@ empty_directory(wchar_t* name, BOOL force, BOOL verbose, BOOL quiet)
     HANDLE hFind = INVALID_HANDLE_VALUE;
 	// Used while disabling Wow64 FS Redirection
 	//Unused for now PVOID* wow64value = NULL;
+
+    /* If we have symlinks, we need to check if "name" is a symlink
+     * first.  If so, we need to delete it instead.
+     *
+     * Likewise if -j was passed, do the same for junctions
+     */
+    if (handle_del_reparse_point(name, &rv))
+        return rv;
 
     /* without a trailing \*, the listing for "c:\windows" would show info
      * for "c:\windows", not files *inside* of "c:\windows"
@@ -164,13 +274,19 @@ empty_directory(wchar_t* name, BOOL force, BOOL verbose, BOOL quiet)
         StringCchCatW(fullName, MAX_PATH, L"\\");
         StringCchCatW(fullName, MAX_PATH, findFileData.cFileName);
         if (findFileData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-            if (wcscmp(L".", findFileData.cFileName) != 0 && wcscmp(L"..", findFileData.cFileName) != 0){
-                if (!empty_directory(fullName, force, verbose, quiet)){
-                    rv = FALSE;
-                }
+            // don't try to do anything with "." or ".."
+            if (wcscmp(L".", findFileData.cFileName) == 0 ||
+                wcscmp(L"..", findFileData.cFileName) == 0)
+            {
+                continue;
+            }
+
+            
+            if (!empty_directory(fullName)){
+                rv = FALSE;
             }
         } else {
-            if (!del_file(fullName, force, verbose, quiet)) {
+            if (!del_file(fullName)) {
                 rv = FALSE;
             }
         }
@@ -192,7 +308,7 @@ empty_directory(wchar_t* name, BOOL force, BOOL verbose, BOOL quiet)
 
     FindClose(hFind);
 
-    del_directory(name, force, verbose, quiet);
+    del_directory(name);
 
     return rv;
 
@@ -207,31 +323,31 @@ empty_directory(wchar_t* name, BOOL force, BOOL verbose, BOOL quiet)
  * error messages
  */
 BOOL
-del(wchar_t* name, BOOL recurse, BOOL force, BOOL verbose, BOOL quiet)
+del(wchar_t* name)
 {
-    BOOL rv = TRUE;
     DWORD fileAttr = GetFileAttributesW(name);
-    if (fileAttr == INVALID_FILE_ATTRIBUTES){
-        rv = FALSE;
-        if (!quiet) {
-            fwprintf(stderr, L"Invalid file attributes for \"%ws\"\n", name);
-        }
-    } else if (fileAttr & FILE_ATTRIBUTE_DIRECTORY) {
-        if (recurse){
-            if (!empty_directory(name, force, verbose, quiet)){
-                rv = FALSE;
-            }
-        } else {
-            if (!del_directory(name, force, verbose, quiet)){
-                rv = FALSE;
-            }
-        }
-    } else {
-        if (!del_file(name, force, verbose, quiet)){
-            rv = FALSE;
-        }
+    if (fileAttr == INVALID_FILE_ATTRIBUTES) {
+        fwprintf(stderr, L"Invalid file attributes for \"%ws\"\n", name);
+        return FALSE;
     }
-    return rv;
+
+    if (fileAttr & FILE_ATTRIBUTE_REPARSE_POINT) {
+        BOOL rv = TRUE;
+        BOOL handled = handle_del_reparse_point(name, &rv);
+        if (handled)
+            return rv;
+    }
+
+    if (fileAttr & FILE_ATTRIBUTE_DIRECTORY) {
+        if (recurse) {
+            return empty_directory(name);
+        }
+
+        fwprintf(stderr, L"cannot remove directory '%ws': Is a directory\n", name);
+        return FALSE;
+    }
+
+    return del_file(name);
 }
 
 /* This struct is used by the command line parser */
@@ -245,7 +361,6 @@ wmain(int argc, wchar_t** argv)
 {
     int exitCode = 0;
     int i, j;
-    BOOL verbose = FALSE, force = FALSE, quiet = FALSE, recurse = FALSE;
     BOOL onlyFiles = FALSE;
     struct node *previous = NULL;
     struct node *start = NULL;
@@ -277,8 +392,17 @@ wmain(int argc, wchar_t** argv)
                     case L'f':
                         force = TRUE;
                         break;
+                    case L'j':
+                        deleteJunctions = true;
+                        break;
                     default:
                         fwprintf(stderr, L"The option -%wc is not valid\n", argv[i][j]);
+                        fwprintf(stderr, L"Valid options are: \n");
+                        fwprintf(stderr, L" -v  Be verbose \n");
+                        fwprintf(stderr, L" -q  Be quiet \n");
+                        fwprintf(stderr, L" -r  Delete directories recursively \n");
+                        fwprintf(stderr, L" -f  Force deletion \n");
+                        fwprintf(stderr, L" -j  Delete junction points, don't recurse into them \n");
                         exitCode = 1;
                  }
             }
@@ -298,6 +422,12 @@ wmain(int argc, wchar_t** argv)
         fwprintf(stderr, L"The -q (quiet) and -v (verbose) options are incompatible\n");
         exitCode = 1;
     }
+
+    /* If we have symlinks on this OS (>= Vista), we need to check for them before
+     * deleting directories.
+     */
+    hasSymlinks = (GetVersion() & 0xff) >= 0x06;
+
     /* If everything is good, its time to start deleting the files.
      * We do this by traversing the linked list, deleting the current
      * node then deleting the current node before moving to the next
@@ -305,7 +435,7 @@ wmain(int argc, wchar_t** argv)
     if (!exitCode) {
         struct node* current = start;
         while (current != NULL){
-            BOOL result = del(current->data, recurse, force, verbose, quiet);
+            BOOL result = del(current->data);
             if (!result) {
                 exitCode = 1;
             }
