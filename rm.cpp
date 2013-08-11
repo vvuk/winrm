@@ -28,11 +28,33 @@
 #endif
 
 static bool hasSymlinks = false;
+static bool hasRestoreBackupPrivilege = false;
+
 static bool deleteJunctions = false;
 static bool quiet = false;
 static bool verbose = false;
 static bool force = false;
 static bool recurse = false;
+
+
+bool
+EnsureBackupRestorePrivilege()
+{
+    if (hasRestoreBackupPrivilege)
+        return true;
+
+    HANDLE token;
+    TOKEN_PRIVILEGES tp;
+    OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES, &token);
+    LookupPrivilegeValue(NULL, SE_RESTORE_NAME, &tp.Privileges[0].Luid);
+    tp.PrivilegeCount = 1;
+    tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    AdjustTokenPrivileges(token, FALSE, &tp, sizeof(TOKEN_PRIVILEGES), NULL, NULL);
+    CloseHandle(token);
+
+    hasRestoreBackupPrivilege = true;
+    return true;
+}
 
 /* TODO:
  *   -should the wow64fsredirection stuff be applicable to the whole app
@@ -63,6 +85,8 @@ print_error(DWORD errNum, wchar_t* filename, FILE* fhandle) {
 /*
  * Deal with symlinks and reparse points on directories.  Returns TRUE and sets rv
  * if it handled the deletion.
+ *
+ * Should we ever do multithreaded deletion, this is not thread safe!
  */
 BOOL
 handle_del_reparse_point(wchar_t *name, BOOL *rv)
@@ -81,7 +105,12 @@ handle_del_reparse_point(wchar_t *name, BOOL *rv)
         return TRUE;
     }
 
-    REPARSE_GUID_DATA_BUFFER *rd = (REPARSE_GUID_DATA_BUFFER*) malloc(MAXIMUM_REPARSE_DATA_BUFFER_SIZE);
+    // XXX not thread safe
+    static REPARSE_GUID_DATA_BUFFER *rd = NULL;
+    if (!rd) {
+        rd = (REPARSE_GUID_DATA_BUFFER*) malloc(MAXIMUM_REPARSE_DATA_BUFFER_SIZE);
+    }
+
     DWORD dwRet;
 
     if (!DeviceIoControl(hDir, FSCTL_GET_REPARSE_POINT, NULL, 0,
@@ -97,7 +126,6 @@ handle_del_reparse_point(wchar_t *name, BOOL *rv)
         // This is a symlink; we must hand it to del_directory directly
         // to delete the symlink (which is done by deleting the directory normally).
         CloseHandle(hDir);
-        free(rd);
 
         *rv = RemoveDirectoryW(name);
         if (!*rv) {
@@ -111,35 +139,48 @@ handle_del_reparse_point(wchar_t *name, BOOL *rv)
         return TRUE;
     }
 
+    // close this, because it was opened for read only.  If we need
+    // to munge reparse points, we're going to need to open for write.
+    CloseHandle(hDir);
+
     if (rd->ReparseTag == IO_REPARSE_TAG_MOUNT_POINT &&
         deleteJunctions)
     {
         DWORD tag = rd->ReparseTag;
         GUID gu = rd->ReparseGuid;
         
+        if (!EnsureBackupRestorePrivilege()) {
+            fwprintf(stderr, L"Internal error: couldn't adjust token privileges to delete junction");
+            return FALSE;
+        }
+
+        HANDLE hDir = CreateFile(name, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_DELETE | FILE_SHARE_WRITE,
+                                 NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+        if (!hDir) {
+            fwprintf(stderr, L"Failed to open directory '%ws': 0x%08x\n", name, GetLastError());
+            *rv = FALSE;
+            return TRUE;
+        }
+
         memset(rd, 0, MAXIMUM_REPARSE_DATA_BUFFER_SIZE);
         rd->ReparseTag = tag;
-
+        rd->ReparseGuid = gu;
         BOOL ok = DeviceIoControl(hDir, FSCTL_DELETE_REPARSE_POINT, rd,
                                   REPARSE_GUID_DATA_BUFFER_HEADER_SIZE, NULL, 0, &dwRet, NULL);
-        if (!ok) {
-            rd->ReparseGuid = gu;
-            ok = DeviceIoControl(hDir, FSCTL_DELETE_REPARSE_POINT, rd,
-                                 REPARSE_GUID_DATA_BUFFER_HEADER_SIZE, NULL, 0, &dwRet, NULL);
-        }
+
+        CloseHandle(hDir);
 
         if (!ok) {
             fwprintf(stderr, L"DeviceIoControl failed to delete junction '%ws': 0x%08x\n", name, GetLastError());
+            *rv = FALSE;
+            return TRUE;
         }
 
-        *rv = ok;
-        CloseHandle(hDir);
-        free(rd);
+        // if we deleted a junction, the last step is to remove the (now empty, normal) directory itself
+        *rv = RemoveDirectoryW(name);
         return TRUE;
     }
 
-    CloseHandle(hDir);
-    free(rd);
     return FALSE;
 }
 

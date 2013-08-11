@@ -1,5 +1,5 @@
 winrm.exe: rm.cpp
-	cl -Zi -DUNICODE=1 -D_UNICODE=1 rm.cpp -Fewinrm.exe
+	cl -Zi -DUNICODE=1 -D_UNICODE=1 rm.cpp -Fewinrm.exe advapi32.lib
 
 test: winrm.exe
 	@echo Testing single file operations
