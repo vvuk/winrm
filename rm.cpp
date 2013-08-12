@@ -68,7 +68,7 @@ EnsureBackupRestorePrivilege()
  * a stdio file handle to the file where output should be printed
  */
 void
-print_error(DWORD errNum, wchar_t* filename, FILE* fhandle) {
+print_error(DWORD errNum, wchar_t* filename, FILE* fhandle, wchar_t* prefix = NULL) {
     wchar_t* msg;
     FormatMessageW(
             FORMAT_MESSAGE_ALLOCATE_BUFFER |
@@ -79,7 +79,9 @@ print_error(DWORD errNum, wchar_t* filename, FILE* fhandle) {
             MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
             (LPWSTR) &msg,
             0, NULL);
-    fwprintf(fhandle, L"\"%ws\" - %ws", filename, msg);
+    if (!prefix)
+        prefix = L"";
+    fwprintf(fhandle, L"%ws\"%ws\": %ws", prefix, filename, msg);
 }
 
 /*
@@ -222,7 +224,7 @@ del_file(wchar_t* name)
         DWORD fileAttr = GetFileAttributesW(name);
         if (fileAttr == INVALID_FILE_ATTRIBUTES) {
             if (!quiet) {
-                fwprintf(stderr, L"invalid file attributes for \"%ws\"\n", name);
+                print_error(GetLastError(), name, stderr, L"error getting file attributes for ");
             }
             // Hmm, should I still try to delete the file?
             return FALSE;
@@ -368,7 +370,16 @@ del(wchar_t* name)
 {
     DWORD fileAttr = GetFileAttributesW(name);
     if (fileAttr == INVALID_FILE_ATTRIBUTES) {
-        fwprintf(stderr, L"Invalid file attributes for \"%ws\"\n", name);
+        DWORD err = GetLastError();
+        if (force && (err == ERROR_INVALID_NAME ||
+                      err == ERROR_FILE_NOT_FOUND ||
+                      err == ERROR_PATH_NOT_FOUND))
+        {
+            // it's already deleted; nothing to do
+            return TRUE;
+        }
+
+        print_error(err, name, stderr, L"cannot get attributes for ");
         return FALSE;
     }
 
