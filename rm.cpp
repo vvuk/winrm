@@ -27,34 +27,10 @@
 #define IO_REPARSE_TAG_SYMLINK 0xA000000C
 #endif
 
-static bool hasSymlinks = false;
-static bool hasRestoreBackupPrivilege = false;
-
-static bool deleteJunctions = false;
 static bool quiet = false;
 static bool verbose = false;
 static bool force = false;
 static bool recurse = false;
-
-
-bool
-EnsureBackupRestorePrivilege()
-{
-    if (hasRestoreBackupPrivilege)
-        return true;
-
-    HANDLE token;
-    TOKEN_PRIVILEGES tp;
-    OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES, &token);
-    LookupPrivilegeValue(NULL, SE_RESTORE_NAME, &tp.Privileges[0].Luid);
-    tp.PrivilegeCount = 1;
-    tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
-    AdjustTokenPrivileges(token, FALSE, &tp, sizeof(TOKEN_PRIVILEGES), NULL, NULL);
-    CloseHandle(token);
-
-    hasRestoreBackupPrivilege = true;
-    return true;
-}
 
 /* TODO:
  *   -should the wow64fsredirection stuff be applicable to the whole app
@@ -91,99 +67,19 @@ print_error(DWORD errNum, wchar_t* filename, FILE* fhandle, wchar_t* prefix = NU
  * Should we ever do multithreaded deletion, this is not thread safe!
  */
 BOOL
-handle_del_reparse_point(wchar_t *name, BOOL *rv)
+handle_del_reparse_point(wchar_t *name)
 {
     if ((GetFileAttributesW(name) & FILE_ATTRIBUTE_REPARSE_POINT) == 0)
         return FALSE;
 
-    if (!(hasSymlinks || deleteJunctions))
-        return FALSE;
-
-    HANDLE hDir = CreateFile(name, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE | FILE_SHARE_WRITE,
-                             NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
-    if (!hDir) {
-        fwprintf(stderr, L"Failed to open directory '%ws': 0x%08x\n", name, GetLastError());
-        *rv = FALSE;
-        return TRUE;
+    BOOL ok = RemoveDirectoryW(name);
+    if (!ok) {
+        print_error(GetLastError(), name, stderr, L"RemoveDirectory ");
+    } else if (verbose) {
+        fwprintf(stdout, L"deleted reparse/symlink directory \"%ws\"\n", name);
     }
 
-    // XXX not thread safe
-    static REPARSE_GUID_DATA_BUFFER *rd = NULL;
-    if (!rd) {
-        rd = (REPARSE_GUID_DATA_BUFFER*) malloc(MAXIMUM_REPARSE_DATA_BUFFER_SIZE);
-    }
-
-    DWORD dwRet;
-
-    if (!DeviceIoControl(hDir, FSCTL_GET_REPARSE_POINT, NULL, 0,
-                         rd, MAXIMUM_REPARSE_DATA_BUFFER_SIZE,
-                         &dwRet, NULL))
-    {
-        fwprintf(stderr, L"DeviceIoControl failed for directory '%ws': 0x%08x\n", name, GetLastError());
-        *rv = FALSE;
-        return TRUE;
-    }
-
-    if (rd->ReparseTag == IO_REPARSE_TAG_SYMLINK) {
-        // This is a symlink; we must hand it to del_directory directly
-        // to delete the symlink (which is done by deleting the directory normally).
-        CloseHandle(hDir);
-
-        *rv = RemoveDirectoryW(name);
-        if (!*rv) {
-            if (!quiet) {
-                print_error(GetLastError(), name, stderr);
-            }
-        }
-        if (verbose) {
-            fwprintf(stdout, L"deleted symlink directory \"%ws\"\n", name);
-        }
-        return TRUE;
-    }
-
-    // close this, because it was opened for read only.  If we need
-    // to munge reparse points, we're going to need to open for write.
-    CloseHandle(hDir);
-
-    if (rd->ReparseTag == IO_REPARSE_TAG_MOUNT_POINT &&
-        deleteJunctions)
-    {
-        DWORD tag = rd->ReparseTag;
-        GUID gu = rd->ReparseGuid;
-        
-        if (!EnsureBackupRestorePrivilege()) {
-            fwprintf(stderr, L"Internal error: couldn't adjust token privileges to delete junction");
-            return FALSE;
-        }
-
-        HANDLE hDir = CreateFile(name, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_DELETE | FILE_SHARE_WRITE,
-                                 NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
-        if (!hDir) {
-            fwprintf(stderr, L"Failed to open directory '%ws': 0x%08x\n", name, GetLastError());
-            *rv = FALSE;
-            return TRUE;
-        }
-
-        memset(rd, 0, MAXIMUM_REPARSE_DATA_BUFFER_SIZE);
-        rd->ReparseTag = tag;
-        rd->ReparseGuid = gu;
-        BOOL ok = DeviceIoControl(hDir, FSCTL_DELETE_REPARSE_POINT, rd,
-                                  REPARSE_GUID_DATA_BUFFER_HEADER_SIZE, NULL, 0, &dwRet, NULL);
-
-        CloseHandle(hDir);
-
-        if (!ok) {
-            fwprintf(stderr, L"DeviceIoControl failed to delete junction '%ws': 0x%08x\n", name, GetLastError());
-            *rv = FALSE;
-            return TRUE;
-        }
-
-        // if we deleted a junction, the last step is to remove the (now empty, normal) directory itself
-        *rv = RemoveDirectoryW(name);
-        return TRUE;
-    }
-
-    return FALSE;
+    return ok;
 }
 
 /* Remove an empty directory.  This will fail if there are still files or
@@ -196,9 +92,6 @@ del_directory(wchar_t* name)
     if (verbose) {
         fwprintf(stdout, L"deleting directory \"%ws\"\n", name);
     }
-
-    if (handle_del_reparse_point(name, &rv))
-        return rv;
 
     BOOL delStatus = RemoveDirectoryW(name);
     if (!delStatus) {
@@ -282,11 +175,10 @@ empty_directory(wchar_t* name)
 
     /* If we have symlinks, we need to check if "name" is a symlink
      * first.  If so, we need to delete it instead.
-     *
-     * Likewise if -j was passed, do the same for junctions
+
      */
-    if (handle_del_reparse_point(name, &rv))
-        return rv;
+    if (handle_del_reparse_point(name))
+        return TRUE;
 
     /* without a trailing \*, the listing for "c:\windows" would show info
      * for "c:\windows", not files *inside* of "c:\windows"
@@ -384,10 +276,7 @@ del(wchar_t* name)
     }
 
     if (fileAttr & FILE_ATTRIBUTE_REPARSE_POINT) {
-        BOOL rv = TRUE;
-        BOOL handled = handle_del_reparse_point(name, &rv);
-        if (handled)
-            return rv;
+        return del_directory(name);
     }
 
     if (fileAttr & FILE_ATTRIBUTE_DIRECTORY) {
@@ -444,9 +333,6 @@ wmain(int argc, wchar_t** argv)
                     case L'f':
                         force = TRUE;
                         break;
-                    case L'j':
-                        deleteJunctions = true;
-                        break;
                     default:
                         fwprintf(stderr, L"The option -%wc is not valid\n", argv[i][j]);
                         fwprintf(stderr, L"Valid options are: \n");
@@ -454,7 +340,6 @@ wmain(int argc, wchar_t** argv)
                         fwprintf(stderr, L" -q  Be quiet \n");
                         fwprintf(stderr, L" -r  Delete directories recursively \n");
                         fwprintf(stderr, L" -f  Force deletion \n");
-                        fwprintf(stderr, L" -j  Delete junction points, don't recurse into them \n");
                         exitCode = 1;
                  }
             }
@@ -474,11 +359,6 @@ wmain(int argc, wchar_t** argv)
         fwprintf(stderr, L"The -q (quiet) and -v (verbose) options are incompatible\n");
         exitCode = 1;
     }
-
-    /* If we have symlinks on this OS (>= Vista), we need to check for them before
-     * deleting directories.
-     */
-    hasSymlinks = (GetVersion() & 0xff) >= 0x06;
 
     /* If everything is good, its time to start deleting the files.
      * We do this by traversing the linked list, deleting the current
