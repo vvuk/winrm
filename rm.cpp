@@ -32,6 +32,16 @@ static bool verbose = false;
 static bool force = false;
 static bool recurse = false;
 
+// hack for lack of auto_array_ptr
+template<typename T>
+class ScopedDeleteArrayPtr {
+public:
+    ScopedDeleteArrayPtr(T **ptr) : _ptr(ptr) {}
+    ~ScopedDeleteArrayPtr() { if (*_ptr) delete [] *_ptr; }
+protected:
+    T **_ptr;
+};
+
 /* TODO:
  *   -should the wow64fsredirection stuff be applicable to the whole app
  *    or only per empty_directory invocation?
@@ -67,8 +77,10 @@ print_error(DWORD errNum, wchar_t* filename, FILE* fhandle, wchar_t* prefix = NU
  * Should we ever do multithreaded deletion, this is not thread safe!
  */
 BOOL
-handle_del_reparse_point(wchar_t *name)
+handle_del_reparse_point(wchar_t *name, wchar_t *origName = NULL)
 {
+    if (!origName) origName = name;
+
     if ((GetFileAttributesW(name) & FILE_ATTRIBUTE_REPARSE_POINT) == 0)
         return FALSE;
 
@@ -86,22 +98,24 @@ handle_del_reparse_point(wchar_t *name)
  * other directories in the directory specified by name
  */
 BOOL
-del_directory(wchar_t* name)
+del_directory(wchar_t* name, wchar_t* origName = NULL)
 {
+    if (!origName) origName = name;
+
     BOOL rv = TRUE;
     if (verbose) {
-        fwprintf(stdout, L"deleting directory \"%ws\"\n", name);
+        fwprintf(stdout, L"deleting directory \"%ws\"\n", origName);
     }
 
     BOOL delStatus = RemoveDirectoryW(name);
     if (!delStatus) {
         rv = FALSE;
         if (!quiet) {
-            print_error(GetLastError(), name, stderr);
+            print_error(GetLastError(), origName, stderr);
         }
     }
     if (verbose) {
-        fwprintf(stdout, L"deleted directory \"%ws\"\n", name);
+        fwprintf(stdout, L"deleted directory \"%ws\"\n", origName);
     }
     return rv;
 }
@@ -110,21 +124,23 @@ del_directory(wchar_t* name)
  * attributes are cleared before deleting the file
  */
 BOOL
-del_file(wchar_t* name)
+del_file(wchar_t* name, wchar_t* origName = NULL)
 {
+    if (!origName) origName = name;
+
     BOOL rv = TRUE;
     if (force) {
         DWORD fileAttr = GetFileAttributesW(name);
         if (fileAttr == INVALID_FILE_ATTRIBUTES) {
             if (!quiet) {
-                print_error(GetLastError(), name, stderr, L"error getting file attributes for ");
+                print_error(GetLastError(), origName, stderr, L"error getting file attributes for ");
             }
             // Hmm, should I still try to delete the file?
             return FALSE;
         }
         if (fileAttr & FILE_ATTRIBUTE_DIRECTORY) {
             if (!quiet) {
-                fwprintf(stderr, L"%ws is a directory, not a file\n", name);
+                fwprintf(stderr, L"%ws is a directory, not a file\n", origName);
                 rv = FALSE;
             }
         }
@@ -133,27 +149,27 @@ del_file(wchar_t* name)
             fileAttr & FILE_ATTRIBUTE_READONLY) {
             DWORD toSet = FILE_ATTRIBUTE_NORMAL;
             if (verbose) {
-                wprintf(L"changing \"%ws\" file attributes to be removable\n", name);
+                wprintf(L"changing \"%ws\" file attributes to be removable\n", origName);
             }
             DWORD setAttrStatus = SetFileAttributesW(name, toSet);
             if (!setAttrStatus) {
                 rv = FALSE;
                 if (!quiet) {
-                    print_error(setAttrStatus, name, stderr);
+                    print_error(setAttrStatus, origName, stderr);
                 }
             }
         }
     }
     if (verbose) {
-        fwprintf(stdout, L"deleting \"%ws\"\n", name);
+        fwprintf(stdout, L"deleting \"%ws\"\n", origName);
     }
     BOOL delStatus = DeleteFileW(name);
     if (!delStatus) {
         rv = FALSE;
         if (!quiet)
-            print_error(GetLastError(), name, stderr);
+            print_error(GetLastError(), origName, stderr);
     } else if (verbose) {
-        fwprintf(stdout, L"deleted \"%ws\"\n", name);
+        fwprintf(stdout, L"deleted \"%ws\"\n", origName);
     }
     return rv;
 }
@@ -162,29 +178,34 @@ del_file(wchar_t* name)
  * then the directory itself.
  */
 BOOL
-empty_directory(wchar_t* name)
+empty_directory(wchar_t* name, wchar_t* origName = NULL)
 {
+    if (!origName) origName = name;
+
     BOOL rv = TRUE;
     DWORD ffStatus;
     WIN32_FIND_DATAW findFileData;
-    // TODO: Don't waste so much memory!
-    wchar_t dir[MAX_PATH];
     HANDLE hFind = INVALID_HANDLE_VALUE;
+    wchar_t *dir = NULL, *fullName = NULL;
+    ScopedDeleteArrayPtr<wchar_t> dirDel(&dir), nameDel(&fullName);
+    size_t szpath = 32000;
 	// Used while disabling Wow64 FS Redirection
 	//Unused for now PVOID* wow64value = NULL;
 
     /* If we have symlinks, we need to check if "name" is a symlink
      * first.  If so, we need to delete it instead.
-
      */
     if (handle_del_reparse_point(name))
         return TRUE;
 
+    dir = new wchar_t[szpath];
+    fullName = new wchar_t[szpath];
+
     /* without a trailing \*, the listing for "c:\windows" would show info
      * for "c:\windows", not files *inside* of "c:\windows"
      */
-    StringCchCopyW(dir, MAX_PATH, name); // TODO: Check return
-    StringCchCatW(dir, MAX_PATH, L"\\*");
+    StringCchCopyW(dir, szpath, name); // TODO: Check return
+    StringCchCatW(dir, szpath, L"\\*");
 
     /* We don't know what's going on, but Wow64 redirection
      * is not working quite right.  Since nothing we have should
@@ -198,16 +219,15 @@ empty_directory(wchar_t* name)
     if (hFind == INVALID_HANDLE_VALUE) {
         rv = FALSE;
         if (!quiet) {
-            print_error(GetLastError(), name, stderr);
+            print_error(GetLastError(), origName, stderr);
         }
         return rv;
     }
 
     do { 
-        wchar_t fullName[MAX_PATH];
-        StringCchCopyW(fullName, MAX_PATH, name);
-        StringCchCatW(fullName, MAX_PATH, L"\\");
-        StringCchCatW(fullName, MAX_PATH, findFileData.cFileName);
+        StringCchCopyW(fullName, szpath, name);
+        StringCchCatW(fullName, szpath, L"\\");
+        StringCchCatW(fullName, szpath, findFileData.cFileName);
         if (findFileData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
             // don't try to do anything with "." or ".."
             if (wcscmp(L".", findFileData.cFileName) == 0 ||
@@ -243,7 +263,7 @@ empty_directory(wchar_t* name)
 
     FindClose(hFind);
 
-    del_directory(name);
+    del_directory(name, origName);
 
     return rv;
 
@@ -292,6 +312,10 @@ del(wchar_t* origName)
         // add the \\?\ prefix
         fullName[0] = fullName[1] = fullName[3] = '\\';
         fullName[2] = '?';
+
+        if (verbose) {
+            fwprintf(stderr, L"Expanded out '%s' => '%s'\n", origName, fullName);
+        }
 
         name = fullName;
     }
