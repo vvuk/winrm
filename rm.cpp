@@ -258,8 +258,44 @@ empty_directory(wchar_t* name)
  * error messages
  */
 BOOL
-del(wchar_t* name)
+del(wchar_t* origName)
 {
+    wchar_t *name = origName;
+
+    __declspec(thread) static wchar_t *fullName = NULL;
+    __declspec(thread) static wchar_t *fullNamePathPart = NULL;
+    static size_t szname = 32000;
+    if (!fullName) {
+        fullName = new wchar_t[szname + 4];
+        fullNamePathPart = &fullName[4];
+    }
+
+    // if the path starts with "\\", expand it out
+    if (!(origName[0] == '\\' && origName[1] == '\\')) {
+        fullName[0] = 0;
+        fullNamePathPart[0] = 0;
+
+        // expand out origName into name, as a UNC \\?\ path
+        DWORD ret = GetFullPathNameW(origName, szname, fullNamePathPart, NULL);
+        if (ret <= 0) {
+            // error
+            print_error(GetLastError(), origName, stderr, L"can't expand to full path name");
+            return FALSE;
+        }
+
+        if (ret >= szname) {
+            // too long
+            print_error(GetLastError(), origName, stderr, L"expanding to full path would yield a path longer than 32,000 characters!");
+            return FALSE;
+        }
+
+        // add the \\?\ prefix
+        fullName[0] = fullName[1] = fullName[3] = '\\';
+        fullName[2] = '?';
+
+        name = fullName;
+    }
+
     DWORD fileAttr = GetFileAttributesW(name);
     if (fileAttr == INVALID_FILE_ATTRIBUTES) {
         DWORD err = GetLastError();
