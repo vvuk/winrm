@@ -136,7 +136,7 @@ del_file(wchar_t* name)
                 wprintf(L"changing \"%ws\" file attributes to be removable\n", name);
             }
             DWORD setAttrStatus = SetFileAttributesW(name, toSet);
-            if (!setAttrStatus){
+            if (!setAttrStatus) {
                 rv = FALSE;
                 if (!quiet) {
                     print_error(setAttrStatus, name, stderr);
@@ -217,7 +217,7 @@ empty_directory(wchar_t* name)
             }
 
             
-            if (!empty_directory(fullName)){
+            if (!empty_directory(fullName)) {
                 rv = FALSE;
             }
         } else {
@@ -301,11 +301,11 @@ int
 wmain(int argc, wchar_t** argv)
 {
     int exitCode = 0;
-    int i, j;
     BOOL onlyFiles = FALSE;
+
     struct node *previous = NULL;
     struct node *start = NULL;
-    for (i = 1 ; i < argc ; i++) {
+    for (int i = 1; i < argc; i++) {
         if (wcscmp(argv[i], L"--") == 0) {
             /* Once we've seen '--' as an arg in the argv,
              * we want to interpret everything after that point
@@ -319,8 +319,8 @@ wmain(int argc, wchar_t** argv)
              * being another - in a case and use that case and wsccmp
              * to set the options.
              */
-            for (j = 1 ; j < wcslen(argv[i]) ; j++) {
-                switch(argv[i][j]){
+            for (int j = 1; j < wcslen(argv[i]); j++) {
+                switch (argv[i][j]) {
                     case L'v':
                         verbose = TRUE;
                         break;
@@ -328,6 +328,7 @@ wmain(int argc, wchar_t** argv)
                         quiet = TRUE;
                         break;
                     case L'r':
+                    case L'R':
                         recurse = TRUE;
                         break;
                     case L'f':
@@ -335,11 +336,11 @@ wmain(int argc, wchar_t** argv)
                         break;
                     default:
                         fwprintf(stderr, L"The option -%wc is not valid\n", argv[i][j]);
-                        fwprintf(stderr, L"Valid options are: \n");
-                        fwprintf(stderr, L" -v  Be verbose \n");
-                        fwprintf(stderr, L" -q  Be quiet \n");
-                        fwprintf(stderr, L" -r  Delete directories recursively \n");
-                        fwprintf(stderr, L" -f  Force deletion \n");
+                        fwprintf(stderr, L"Valid options are:\n");
+                        fwprintf(stderr, L" -v Be verbose\n");
+                        fwprintf(stderr, L" -q Be quiet\n");
+                        fwprintf(stderr, L" -r Delete directories recursively (also -R)\n");
+                        fwprintf(stderr, L" -f Force deletion\n");
                         exitCode = 1;
                  }
             }
@@ -366,7 +367,7 @@ wmain(int argc, wchar_t** argv)
      */
     if (!exitCode) {
         struct node* current = start;
-        while (current != NULL){
+        while (current != NULL) {
             BOOL result = del(current->data);
             if (!result) {
                 exitCode = 1;
