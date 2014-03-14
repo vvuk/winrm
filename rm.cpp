@@ -290,7 +290,8 @@ del(wchar_t* origName)
         fullNamePathPart = &fullName[4];
     }
 
-    // if the path starts with "\\", expand it out
+    // if the path doesn't start with "\\", expand it out; that is, if it's not
+    // a full UNC path
     if (!(origName[0] == '\\' && origName[1] == '\\')) {
         fullName[0] = 0;
         fullNamePathPart[0] = 0;
@@ -318,6 +319,13 @@ del(wchar_t* origName)
         }
 
         name = fullName;
+    }
+
+    // then if the name ends up a slash, nuke it
+    size_t nlen = wcslen(name);
+    if (name[nlen-1] == '\\') {
+        name[nlen-1] = 0;
+        nlen--;
     }
 
     DWORD fileAttr = GetFileAttributesW(name);
