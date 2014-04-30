@@ -45,7 +45,7 @@ protected:
 /* TODO:
  *   -should the wow64fsredirection stuff be applicable to the whole app
  *    or only per empty_directory invocation?
- *   -support simple unix-style paths (i.e. map /c/dir1/file1 to c:\\dir1\\file1) 
+ *   -support simple unix-style paths (i.e. map /c/dir1/file1 to c:\\dir1\\file1)
  *   -return non-zero if no files are deleted and -f isn't specified
  *   -multi-thread deletions
  */
@@ -224,7 +224,7 @@ empty_directory(wchar_t* name, wchar_t* origName = NULL)
         return rv;
     }
 
-    do { 
+    do {
         StringCchCopyW(fullName, szpath, name);
         StringCchCatW(fullName, szpath, L"\\");
         StringCchCatW(fullName, szpath, findFileData.cFileName);
@@ -236,7 +236,7 @@ empty_directory(wchar_t* name, wchar_t* origName = NULL)
                 continue;
             }
 
-            
+
             if (!empty_directory(fullName)) {
                 rv = FALSE;
             }
@@ -269,12 +269,20 @@ empty_directory(wchar_t* name, wchar_t* origName = NULL)
 
 }
 
+wchar_t *removeTrailingSlash(wchar_t *source)
+{
+    size_t len = wcslen(source);
+    if((len > 0) && (source[len-1] == '/' || source[len-1] == '\\'))
+        source[len-1] = '\0';
+    return source;
+}
+
 /* This function is used to delete a file or directory specified by the
  * 'name' variable.  The type of 'name' is figured out.  If the recurse
  * option is TRUE, directories will be recursively emptied then deleted.
  * If force is TRUE, file attributes will be changed to allow the program
  * to delete the file.  The verbose option will cause non-fatal error messages
- * to print to stderr.  The quiet option will supress all but fatal 
+ * to print to stderr.  The quiet option will supress all but fatal
  * error messages
  */
 BOOL
@@ -289,6 +297,8 @@ del(wchar_t* origName)
         fullName = new wchar_t[szname + 4];
         fullNamePathPart = &fullName[4];
     }
+
+    removeTrailingSlash(origName);
 
     // if the path starts with "\\", expand it out
     if (!(origName[0] == '\\' && origName[1] == '\\')) {
@@ -440,4 +450,3 @@ wmain(int argc, wchar_t** argv)
 
     return exitCode;
 }
-
