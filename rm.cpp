@@ -19,6 +19,9 @@
 #include <string.h>
 #include <stdio.h>
 
+#define WINRM_VERSION_MAJOR 0
+#define WINRM_VERSION_MINOR 3
+
 #ifndef IO_REPARSE_TAG_MOUNT_POINT
 #define IO_REPARSE_TAG_MOUNT_POINT 0xA0000003
 #endif
@@ -404,11 +407,15 @@ wmain(int argc, wchar_t** argv)
                         break;
                     default:
                         fwprintf(stderr, L"The option -%wc is not valid\n", argv[i][j]);
+                        /* fall through */
+                    case L'h':
+                        fwprintf(stderr, L"winrm version %d.%d\n", WINRM_VERSION_MAJOR, WINRM_VERSION_MINOR);
                         fwprintf(stderr, L"Valid options are:\n");
                         fwprintf(stderr, L" -v Be verbose\n");
                         fwprintf(stderr, L" -q Be quiet\n");
                         fwprintf(stderr, L" -r Delete directories recursively (also -R)\n");
                         fwprintf(stderr, L" -f Force deletion\n");
+                        fwprintf(stderr, L" -h This message\n");
                         exitCode = 1;
                  }
             }
