@@ -20,7 +20,7 @@
 #include <stdio.h>
 
 #define WINRM_VERSION_MAJOR 0
-#define WINRM_VERSION_MINOR 3
+#define WINRM_VERSION_MINOR 4
 
 #ifndef IO_REPARSE_TAG_MOUNT_POINT
 #define IO_REPARSE_TAG_MOUNT_POINT 0xA0000003
@@ -70,6 +70,11 @@ print_error(DWORD errNum, wchar_t* filename, FILE* fhandle, wchar_t* prefix = NU
             0, NULL);
     if (!prefix)
         prefix = L"";
+
+    // skip \\?\ prefix when printing filenames
+    if (wcsncmp(filename, L"\\\\?\\", 4) == 0)
+        filename += 4;
+
     fwprintf(fhandle, L"%ws\"%ws\": %ws", prefix, filename, msg);
 }
 
